@@ -1,0 +1,59 @@
+services:
+  backend:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      NODE_ENV: development
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USERNAME: root
+      DB_PASSWORD: smartlock123
+      DB_DATABASE: smart_lock
+      JWT_SECRET: dev-jwt-secret-change-in-production
+      JWT_EXPIRES_IN: 7d
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      MQTT_CLIENT_ID: smart-lock-backend
+      MQTT_TOPIC_LOCK_COMMAND: fechadura/comando
+      MQTT_TOPIC_LOCK_STATUS: fechadura/status
+      MQTT_TOPIC_NFC: fechadura/nfc
+      MQTT_TOPIC_FACE: fechadura/face
+      UPLOAD_DIR: ./uploads/faces
+      MAX_FILE_SIZE: 5242880
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    volumes:
+      - uploads:/app/uploads
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: smartlock123
+      MYSQL_DATABASE: smart_lock
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+
+volumes:
+  mysql_data:
+  uploads:

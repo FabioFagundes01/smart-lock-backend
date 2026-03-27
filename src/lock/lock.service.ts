@@ -162,6 +162,27 @@ export class LockService implements OnModuleInit {
     this.logger.log('🔒 Comando de fechar enviado');
   }
 
+  // ── Comandos diretos (sem log/auth) ──────────────────────────────
+
+  sendUnlockCommand(): void {
+    this.mqttService.sendOpenCommand('http_get');
+    this.logger.log('🔓 Comando de abrir enviado via GET');
+  }
+
+  sendLockCommand(): void {
+    this.mqttService.sendCloseCommand();
+    this.logger.log('🔒 Comando de fechar enviado via GET');
+  }
+
+  sendDeniedCommand(): void {
+    this.mqttService.publish(this.mqttService.TOPIC_LOCK_COMMAND, {
+      action: 'denied',
+      reason: 'http_get',
+      ts: Date.now(),
+    });
+    this.logger.log('🚫 Comando de acesso negado enviado via GET');
+  }
+
   // ── Histórico de acessos ──────────────────────────────────────────
 
   async getLogs(limit = 50): Promise<AccessLog[]> {

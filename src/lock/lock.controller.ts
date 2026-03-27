@@ -117,6 +117,29 @@ export class LockController {
     }
   }
 
+  // ── Comando direto via GET (lock / unlock) ──────────────────────────
+
+  @Get('command/unlock')
+  @ApiOperation({ summary: 'Enviar comando de abrir via MQTT (GET)' })
+  commandUnlock() {
+    this.lockService.sendUnlockCommand();
+    return { action: 'unlock', sent: true };
+  }
+
+  @Get('command/lock')
+  @ApiOperation({ summary: 'Enviar comando de fechar via MQTT (GET)' })
+  commandLock() {
+    this.lockService.sendLockCommand();
+    return { action: 'lock', sent: true };
+  }
+
+  @Get('command/denied')
+  @ApiOperation({ summary: 'Enviar comando de acesso negado via MQTT (GET)' })
+  commandDenied() {
+    this.lockService.sendDeniedCommand();
+    return { action: 'denied', sent: true };
+  }
+
   // ── Status do sistema ─────────────────────────────────────────────
 
   @Get('status')
