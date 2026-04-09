@@ -1,64 +1,92 @@
 #!/bin/bash
 # Smart Lock Backend - Apple Containers Setup
-# This script sets up MySQL + Mosquitto in Apple Containers
-# and runs the backend natively (Apple Containers builder lacks DNS for full Docker builds)
+# Uses `container` CLI (Apple Containers), no Docker-specific flags like --network or --link
+set -euo pipefail
 
-set -e
+MYSQL_CONTAINER="smartlock-mysql"
+MOSQUITTO_CONTAINER="smartlock-mosquitto"
+MYSQL_PORT="3306"
+MOSQUITTO_PORT="1883"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== Starting Apple Containers system ==="
 container system start 2>/dev/null || true
 
-echo "=== Creating network ==="
-container network create smartlock-net 2>/dev/null || echo "Network already exists"
+# --- MySQL ---
+container stop "$MYSQL_CONTAINER" 2>/dev/null || true
+container rm -f "$MYSQL_CONTAINER" 2>/dev/null || true
 
-echo "=== Starting MySQL ==="
-container rm -f smartlock-mysql 2>/dev/null || true
-container run -d --name smartlock-mysql --network smartlock-net \
+echo "Starting MySQL container..."
+container run \
+  --name "$MYSQL_CONTAINER" \
   -e MYSQL_ROOT_PASSWORD=smartlock123 \
   -e MYSQL_DATABASE=smart_lock \
-  -p 3306:3306 \
-  mysql:8
+  -p "$MYSQL_PORT:3306" \
+  -d \
+  docker.io/library/mysql:8
 
-echo "=== Starting Mosquitto MQTT Broker ==="
-container rm -f smartlock-mosquitto 2>/dev/null || true
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-mkdir -p "$SCRIPT_DIR/mosquitto-config"
-cp "$SCRIPT_DIR/mosquitto.conf" "$SCRIPT_DIR/mosquitto-config/mosquitto.conf"
-container run -d --name smartlock-mosquitto --network smartlock-net \
-  -p 1883:1883 \
-  -v "$SCRIPT_DIR/mosquitto-config:/mosquitto/config" \
-  eclipse-mosquitto:2
-
-echo "=== Waiting for MySQL to be ready ==="
-MYSQL_IP=$(container inspect smartlock-mysql 2>&1 | sed -n 's/.*"address":"\([0-9.]*\).*/\1/p' | head -1)
-MOSQUITTO_IP=$(container inspect smartlock-mosquitto 2>&1 | sed -n 's/.*"address":"\([0-9.]*\).*/\1/p' | head -1)
-
+echo "Waiting for MySQL to be ready..."
 for i in $(seq 1 30); do
-  if node -e "require('mysql2/promise').createConnection({host:'$MYSQL_IP',port:3306,user:'root',password:'smartlock123'}).then(c=>{c.end();process.exit(0)}).catch(()=>process.exit(1))" 2>/dev/null; then
-    echo "MySQL is ready!"
+  if container exec "$MYSQL_CONTAINER" mysqladmin ping -h localhost --silent 2>/dev/null; then
+    echo "MySQL is ready."
     break
   fi
   echo "Waiting for MySQL... ($i/30)"
   sleep 2
 done
 
+# --- Resolve host gateway IP ---
+echo "Detecting host gateway IP..."
+GW_HEX=$(container exec "$MYSQL_CONTAINER" sh -c "awk '\$2==\"00000000\" {print \$3}' /proc/net/route")
+HOST_IP=$(printf '%d.%d.%d.%d' "0x${GW_HEX:6:2}" "0x${GW_HEX:4:2}" "0x${GW_HEX:2:2}" "0x${GW_HEX:0:2}")
+echo "Host gateway IP: $HOST_IP"
+
+# --- Mosquitto ---
+container stop "$MOSQUITTO_CONTAINER" 2>/dev/null || true
+container rm -f "$MOSQUITTO_CONTAINER" 2>/dev/null || true
+
+mkdir -p "$SCRIPT_DIR/mosquitto-config"
+cp "$SCRIPT_DIR/mosquitto.conf" "$SCRIPT_DIR/mosquitto-config/mosquitto.conf"
+
+echo "Starting Mosquitto container..."
+container run \
+  --name "$MOSQUITTO_CONTAINER" \
+  -p "$MOSQUITTO_PORT:1883" \
+  --mount "type=bind,source=$SCRIPT_DIR/mosquitto-config,target=/mosquitto/config,readonly" \
+  -d \
+  docker.io/library/eclipse-mosquitto:2
+
+echo "Waiting for Mosquitto to be ready..."
+sleep 3
+echo "Mosquitto started."
+
+# --- Install dependencies & build ---
 echo "=== Installing dependencies ==="
+cd "$SCRIPT_DIR"
 npm install
 
 echo "=== Building ==="
 npm run build
 
 echo "=== Downloading face models ==="
-node scripts/download-models.js
+node scripts/download-models.js 2>/dev/null || echo "Models already downloaded or script missing"
+
+echo ""
+echo "=== Services ==="
+echo "  MySQL:     localhost:$MYSQL_PORT"
+echo "  Mosquitto: localhost:$MOSQUITTO_PORT"
+echo "  Backend:   http://localhost:3000"
+echo "  Swagger:   http://localhost:3000/docs"
+echo ""
+
+# --- Resolve container IPs ---
+echo "Detecting container IPs..."
+MYSQL_IP=$(container inspect "$MYSQL_CONTAINER" 2>&1 | sed -n 's/.*"address":"\([0-9.]*\).*/\1/p' | head -1)
+MOSQUITTO_IP=$(container inspect "$MOSQUITTO_CONTAINER" 2>&1 | sed -n 's/.*"address":"\([0-9.]*\).*/\1/p' | head -1)
+echo "  MySQL IP:     $MYSQL_IP"
+echo "  Mosquitto IP: $MOSQUITTO_IP"
 
 echo "=== Starting backend ==="
-echo ""
-echo "MySQL IP:     $MYSQL_IP"
-echo "Mosquitto IP: $MOSQUITTO_IP"
-echo "Backend:      http://localhost:3000"
-echo "Swagger:      http://localhost:3000/docs"
-echo ""
-
 PORT=3000 \
 NODE_ENV=development \
 DB_HOST=$MYSQL_IP \

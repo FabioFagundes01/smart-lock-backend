@@ -2,7 +2,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { UsersService } from '../users/users.service';
-import { LoginDto } from './dto/auth.dto';
+import { LoginDto, RegisterDto } from './dto/auth.dto';
 import { User } from '../users/entities/user.entity';
 
 export interface JwtPayload {
@@ -27,6 +27,30 @@ export class AuthService {
     if (!isMatch) throw new UnauthorizedException('Credenciais inválidas');
 
     return user;
+  }
+
+  async register(dto: RegisterDto) {
+    const user = await this.usersService.create({
+      name: dto.name,
+      email: dto.email,
+      password: dto.password,
+    });
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    };
+
+    return {
+      access_token: this.jwtService.sign(payload),
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+      },
+    };
   }
 
   async login(dto: LoginDto) {

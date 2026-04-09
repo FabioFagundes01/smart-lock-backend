@@ -1,15 +1,18 @@
 import {
   Injectable,
   Logger,
-  OnModuleInit,
   BadRequestException,
   InternalServerErrorException,
 } from '@nestjs/common';
-import { canvas, faceapi, faceDetectionNet, faceDetectionOptions } from './face-api-setup';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as tmp from 'tmp';
 
-const FACE_MATCH_THRESHOLD = 0.55;
+const execFileAsync = promisify(execFile);
+const PYTHON = 'python3';
+const WORKER = path.join(process.cwd(), 'scripts', 'face-worker.py');
 
 export interface FaceMatchResult {
   matched: boolean;
@@ -19,112 +22,85 @@ export interface FaceMatchResult {
 }
 
 @Injectable()
-export class FaceService implements OnModuleInit {
+export class FaceService {
   private readonly logger = new Logger(FaceService.name);
-  private modelsLoaded = false;
 
   async onModuleInit() {
-    await this.loadModels();
-  }
-
-  private async loadModels(): Promise<void> {
-    const modelsPath = path.join(process.cwd(), 'models');
-
-    if (!fs.existsSync(modelsPath)) {
-      this.logger.error(
-        `Diretório de modelos não encontrado: ${modelsPath}\n` +
-        `Execute: node scripts/download-models.js`,
-      );
-      return;
-    }
-
+    // Verify python + face_recognition are available
     try {
-      await faceDetectionNet.loadFromDisk(modelsPath);
-      await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath);
-      await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath);
-      this.modelsLoaded = true;
-      this.logger.log('✅ Modelos face-api carregados');
+      await execFileAsync(PYTHON, ['-c', 'import face_recognition; print("OK")']);
+      this.logger.log('✅ Python face_recognition disponível');
     } catch (e) {
-      this.logger.error(`Falha ao carregar modelos: ${e.message}`);
-    }
-  }
-
-  private ensureModels(): void {
-    if (!this.modelsLoaded) {
-      throw new InternalServerErrorException(
-        'Modelos não carregados. Execute: node scripts/download-models.js',
+      this.logger.error(
+        `Python face_recognition não encontrado. Instale: pip3 install face_recognition`,
       );
     }
   }
 
   async extractDescriptor(imagePath: string): Promise<Float32Array> {
-    this.ensureModels();
-
-    let img: any;
+    let result: any;
     try {
-      img = await (canvas as any).loadImage(imagePath);
-    } catch {
-      throw new BadRequestException('Não foi possível abrir a imagem');
+      const { stdout } = await execFileAsync(PYTHON, [WORKER, 'extract', imagePath], {
+        timeout: 30000,
+      });
+      result = JSON.parse(stdout);
+    } catch (e) {
+      this.logger.error(`Erro ao extrair descritor: ${e.message}`);
+      throw new InternalServerErrorException('Falha ao processar imagem facial');
     }
 
-    const detection = await faceapi
-      .detectSingleFace(img, faceDetectionOptions)
-      .withFaceLandmarks()
-      .withFaceDescriptor();
-
-    if (!detection) {
-      throw new BadRequestException(
-        'Nenhum rosto detectado. Envie uma foto com rosto visível e bem iluminado.',
-      );
+    if (result.error) {
+      if (result.error.includes('No face')) {
+        throw new BadRequestException(
+          'Nenhum rosto detectado. Envie uma foto com rosto visível e bem iluminado.',
+        );
+      }
+      throw new BadRequestException(result.error);
     }
 
-    return detection.descriptor;
+    return new Float32Array(result.descriptor);
   }
 
   async recognize(
     imagePath: string,
     labeledDescriptors: { userId: string; descriptor: Float32Array }[],
   ): Promise<FaceMatchResult> {
-    this.ensureModels();
-
     if (labeledDescriptors.length === 0) {
       return { matched: false, userId: null, distance: 1, confidence: 0 };
     }
 
-    let img: any;
+    // Write known descriptors to a temp file
+    const known = labeledDescriptors.map(({ userId, descriptor }) => ({
+      userId,
+      descriptor: Array.from(descriptor),
+    }));
+    const tmpFile = tmp.fileSync({ postfix: '.json', keep: false });
+    fs.writeFileSync(tmpFile.name, JSON.stringify(known));
+
+    let result: any;
     try {
-      img = await (canvas as any).loadImage(imagePath);
-    } catch {
-      throw new BadRequestException('Não foi possível processar a imagem');
+      const { stdout } = await execFileAsync(
+        PYTHON,
+        [WORKER, 'compare', imagePath, tmpFile.name],
+        { timeout: 30000 },
+      );
+      result = JSON.parse(stdout);
+    } catch (e) {
+      this.logger.error(`Erro ao reconhecer rosto: ${e.message}`);
+      throw new InternalServerErrorException('Falha ao processar reconhecimento facial');
+    } finally {
+      tmpFile.removeCallback();
     }
 
-    const detection = await faceapi
-      .detectSingleFace(img, faceDetectionOptions)
-      .withFaceLandmarks()
-      .withFaceDescriptor();
-
-    if (!detection) {
+    if (result.error && result.error.includes('No face')) {
       return { matched: false, userId: null, distance: 1, confidence: 0 };
     }
 
-    const labeled = labeledDescriptors.map(
-      ({ userId, descriptor }) =>
-        new faceapi.LabeledFaceDescriptors(userId, [descriptor]),
-    );
-
-    const matcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_THRESHOLD);
-    const best = matcher.findBestMatch(detection.descriptor);
-
-    const matched = best.label !== 'unknown';
-    const confidence = matched
-      ? Math.max(0, 1 - best.distance / FACE_MATCH_THRESHOLD)
-      : 0;
-
     return {
-      matched,
-      userId: matched ? best.label : null,
-      distance: best.distance,
-      confidence: parseFloat(confidence.toFixed(4)),
+      matched: result.matched || false,
+      userId: result.userId || null,
+      distance: result.distance ?? 1,
+      confidence: result.confidence ?? 0,
     };
   }
 }

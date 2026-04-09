@@ -1,30 +1,30 @@
 /**
- * Setup do face-api para Node.js (CommonJS).
- * Estratégia: usar o bundle .node.js que já inclui tfjs-node,
- * mas interceptar o require para substituir tfjs-node por tfjs puro.
+ * Setup do face-api para Node.js.
+ * Uses tfjs-node (native) + face-api nobundle (uses our tfjs, not its own).
  */
 import * as canvas from 'canvas';
 
-// Interceptar require de tfjs-node antes do face-api carregar
-const Module = require('module');
-const originalRequire = Module.prototype.require;
+// Load tfjs-node FIRST to register the native backend
+const tf = require('@tensorflow/tfjs-node');
 
-Module.prototype.require = function (id: string) {
-  // Redirecionar tfjs-node para tfjs puro (sem bindings C++)
-  if (id === '@tensorflow/tfjs-node' || id === '@tensorflow/tfjs-node-gpu') {
-    return originalRequire.call(this, '@tensorflow/tfjs');
+// Use the nobundle version so it picks up our tfjs-node instead of its own bundled tfjs
+const faceapi = require('@vladmandic/face-api/dist/face-api.node.js');
+
+// Monkey-patch: replace face-api's internal tf.browser.fromPixels
+// with a version that properly handles node-canvas objects
+const origFromPixels = tf.browser.fromPixels.bind(tf.browser);
+faceapi.tf.browser.fromPixels = function (pixels: any, numChannels?: number) {
+  // If it's an Image (not Canvas), draw onto a Canvas first
+  if (pixels.constructor && pixels.constructor.name === 'Image') {
+    const { createCanvas } = canvas as any;
+    const cvs = createCanvas(pixels.width, pixels.height);
+    cvs.getContext('2d').drawImage(pixels, 0, 0);
+    return origFromPixels(cvs, numChannels);
   }
-  return originalRequire.apply(this, arguments);
+  return origFromPixels(pixels, numChannels);
 };
 
-// Agora pode carregar o face-api normalmente
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const faceapi = require('@vladmandic/face-api');
-
-// Restaurar require original
-Module.prototype.require = originalRequire;
-
-// Injetar polyfills do canvas
+// Inject node-canvas polyfills
 const { Canvas, Image, ImageData } = canvas as any;
 faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
 

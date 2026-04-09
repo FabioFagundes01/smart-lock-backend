@@ -10,6 +10,10 @@ import * as bcrypt from 'bcryptjs';
 import { User } from './entities/user.entity';
 import { CreateUserDto, UpdateUserDto, AssignNfcDto } from './dto/user.dto';
 
+function normalizeNfcUid(uid: string): string {
+  return uid.replace(/[:\-\s]/g, '').toUpperCase();
+}
+
 @Injectable()
 export class UsersService {
   constructor(
@@ -26,7 +30,8 @@ export class UsersService {
 
     // Verificar NFC duplicado
     if (dto.nfcUid) {
-      const nfcExists = await this.userRepo.findOne({ where: { nfcUid: dto.nfcUid } });
+      const normalizedUid = normalizeNfcUid(dto.nfcUid);
+      const nfcExists = await this.userRepo.findOne({ where: { nfcUid: normalizedUid } });
       if (nfcExists) {
         throw new ConflictException('UID NFC já cadastrado para outro usuário');
       }
@@ -36,6 +41,7 @@ export class UsersService {
     const user = this.userRepo.create({
       ...dto,
       password: hashed,
+      nfcUid: dto.nfcUid ? normalizeNfcUid(dto.nfcUid) : undefined,
     });
 
     return this.userRepo.save(user);
@@ -58,7 +64,7 @@ export class UsersService {
   }
 
   async findByNfcUid(nfcUid: string): Promise<User | null> {
-    return this.userRepo.findOne({ where: { nfcUid, isActive: true } });
+    return this.userRepo.findOne({ where: { nfcUid: normalizeNfcUid(nfcUid), isActive: true } });
   }
 
   async update(id: string, dto: UpdateUserDto): Promise<User> {
@@ -69,9 +75,12 @@ export class UsersService {
       if (exists) throw new ConflictException('E-mail já em uso');
     }
 
-    if (dto.nfcUid && dto.nfcUid !== user.nfcUid) {
-      const exists = await this.userRepo.findOne({ where: { nfcUid: dto.nfcUid } });
-      if (exists) throw new ConflictException('UID NFC já em uso');
+    if (dto.nfcUid) {
+      dto.nfcUid = normalizeNfcUid(dto.nfcUid);
+      if (dto.nfcUid !== user.nfcUid) {
+        const exists = await this.userRepo.findOne({ where: { nfcUid: dto.nfcUid } });
+        if (exists) throw new ConflictException('UID NFC já em uso');
+      }
     }
 
     if (dto.password) {
@@ -89,14 +98,15 @@ export class UsersService {
 
   async assignNfc(id: string, dto: AssignNfcDto): Promise<User> {
     const user = await this.findOne(id);
+    const normalizedUid = normalizeNfcUid(dto.nfcUid);
 
     // Verificar se NFC está em uso por outro usuário
-    const exists = await this.userRepo.findOne({ where: { nfcUid: dto.nfcUid } });
+    const exists = await this.userRepo.findOne({ where: { nfcUid: normalizedUid } });
     if (exists && exists.id !== id) {
       throw new ConflictException('UID NFC já cadastrado para outro usuário');
     }
 
-    user.nfcUid = dto.nfcUid;
+    user.nfcUid = normalizedUid;
     return this.userRepo.save(user);
   }
 
